@@ -11,7 +11,7 @@ permissions:
 
 env:
   PROJECT_OWNER: prgrms-be-devcourse
-  PROJECT_NUMBER: 268
+  PROJECT_NUMBER: 269
 
 jobs:
   done:

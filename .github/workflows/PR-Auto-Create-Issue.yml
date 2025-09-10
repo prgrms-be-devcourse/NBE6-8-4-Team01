@@ -10,8 +10,8 @@ permissions:
   issues: write
 
 env:
-  PROJECT_OWNER: prgrms-be-devcourse         # ← 조직/사용자 로그인명
-  PROJECT_NUMBER: 268                         # ← Projects(v2) 번호
+  PROJECT_OWNER: prgrms-be-devcourse
+  PROJECT_NUMBER: 269
 
 concurrency:
   group: pr-auto-issue-${{ github.event.pull_request.number }}
