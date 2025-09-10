@@ -1,0 +1,314 @@
+name: PR → Auto-create/update linked Issue (idempotent)
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+env:
+  PROJECT_OWNER: prgrms-be-devcourse         # ← 조직/사용자 로그인명
+  PROJECT_NUMBER: 268                         # ← Projects(v2) 번호
+
+concurrency:
+  group: pr-auto-issue-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ensure-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or update an issue from PR and link back (idempotent)
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECTS_TOKEN }}   # PAT(Projects write + read:org) 사용
+          script: |
+            const pr    = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+
+            // ---- utils ------------------------------------------------------
+            const hasClosingFor = (body, n) =>
+              new RegExp(`\\b(?:close[sd]?|fixe?[sd]?|resolve[sd]?)\\s+#${n}\\b`, 'i').test(body || '');
+
+            const addOrReplaceAutoLink = (body, n) => {
+              const prMarkerRe = /<!--\s*auto-linked-issue:\d+\s*-->/;
+              const stripped = (body || '')
+                .replace(/\b(?:close[sd]?|fixe?[sd]?|resolve[sd]?)\s+#\d+\b/gi, '')
+                .replace(prMarkerRe, '')
+                .trim();
+              return `${stripped}\n\nCloses #${n}\n<!-- auto-linked-issue:${n} -->`.trim();
+            };
+
+            const ensureLabels = async (names) => {
+              for (const name of names) {
+                try { await github.rest.issues.getLabel({ owner, repo, name }); }
+                catch { await github.rest.issues.createLabel({ owner, repo, name, color: "ededed" }); }
+              }
+            };
+
+            // ---- robust section parser (헤더 뒤 추가 문구 허용) -------------------------
+            const body0 = pr.body || "";
+            const grab = (patterns) => {
+              for (const p of patterns) {
+                const re = new RegExp(`^##\\s*${p}(?:[^\\n]*)?\\n([\\s\\S]*?)(?=^##\\s|\\Z)`, 'mi');
+                const m = body0.match(re);
+                if (m) return m[1].trim();
+              }
+              return "";
+            };
+
+            // 템플릿 매핑
+            const WHATWHY   = grab(["무엇을\\s*/\\s*왜"]);
+            const DETAILS   = grab(["어떻게\\(요약\\)", "핵심 변경점 요약"]);
+            const IMPACT    = grab(["영향 범위"]);
+            const CHECKLIST = grab(["체크리스트"]);
+            const PROOF     = grab(["스크린샷/증빙\\(선택\\)", "스크린샷/증빙\\(필요 시\\)", "스크린샷/증빙"]);
+
+            // [TYPE]: 제목 → TYPE/Subject
+            const typeMatch = (pr.title || "").match(/^\s*\[(FEAT|FIX|REFACTOR|COMMENT|STYLE|TEST|CHORE|INIT)\]\s*:\s*/i);
+            const TYPE     = (typeMatch ? typeMatch[1] : "CHORE").toUpperCase();
+            const SUBJECT  = (pr.title || "").replace(/^\s*\[[^\]]+\]\s*:\s*/,'').trim() || `PR #${pr.number}`;
+
+            // ---- 1) 기존 연결(마커) 확인 -----------------------------------------------
+            const prMarkerRe = /<!--\s*auto-linked-issue:(\d+)\s*-->/;
+            let linkedIssueNo = null;
+            const mm = body0.match(prMarkerRe);
+            if (mm) {
+              const n = Number(mm[1]);
+              try { await github.rest.issues.get({ owner, repo, issue_number: n }); linkedIssueNo = n; } catch {}
+            }
+
+            // ---- 2) "이 PR 전용" 자동 생성 이슈 검색 -----------------------------------
+            if (!linkedIssueNo) {
+              const q = `repo:${owner}/${repo} is:issue is:open in:body "Auto-created for PR #${pr.number}" label:auto`;
+              const found = await github.rest.search.issuesAndPullRequests({ q });
+              if (found.data.items.length > 0) linkedIssueNo = found.data.items[0].number;
+            }
+
+            // ---- 3) 동일 제목 + auto 라벨 보조 탐색 ------------------------------------
+            if (!linkedIssueNo) {
+              const t = `[${TYPE}]: ${SUBJECT}`.replace(/"/g, '\\"');
+              const q = `repo:${owner}/${repo} is:issue is:open in:title "${t}" label:auto`;
+              const foundByTitle = await github.rest.search.issuesAndPullRequests({ q });
+              if (foundByTitle.data.items.length === 1) {
+                linkedIssueNo = foundByTitle.data.items[0].number;
+              }
+            }
+
+            // ---- 이슈 본문(폼과 유사한 모양) -------------------------------------------
+            const issueTitle = `[${TYPE}]: ${SUBJECT}`;
+            const issueBody = [
+              `### 변경 유형 (Type)`,
+              TYPE || "_(미입력)_",
+              ``,
+              `### 제목(Subject)`,
+              SUBJECT || "_(미입력)_",
+              ``,
+              `### 무엇을 / 왜`,
+              WHATWHY || "_(PR 본문에 항목 없음)_",
+              ``,
+              `### 상세 설명(필요 시)`,
+              DETAILS || "_(생략)_",
+              ``,
+              `### ToDoList`,
+              (CHECKLIST && CHECKLIST.trim()) || "- [ ] (작성 필요)",
+              ``,
+              `### 비고(스크린샷/참고자료)`,
+              PROOF || "_(생략)_",
+              ``,
+              `---`,
+              `Auto-created for PR #${pr.number}`,
+              `<!-- auto-issue-for-pr:${pr.number} -->`
+            ].join("\n");
+
+            // ---- 4) 생성 또는 업데이트 -------------------------------------------------
+            await ensureLabels(["auto", "needs-triage", TYPE]);
+
+            let issueNumber;
+            if (linkedIssueNo) {
+              issueNumber = linkedIssueNo;
+              await github.rest.issues.update({
+                owner, repo, issue_number: issueNumber,
+                title: issueTitle, body: issueBody, labels: ["auto", "needs-triage", TYPE]
+              });
+            } else {
+              const created = await github.rest.issues.create({
+                owner, repo, title: issueTitle, body: issueBody, labels: ["auto", "needs-triage", TYPE]
+              });
+              issueNumber = created.data.number;
+            }
+
+            // ---- 5) PR 본문에 Closes + 마커 주입(멱등) ---------------------------------
+            const current = pr.body || "";
+            if (!hasClosingFor(current, issueNumber) || !prMarkerRe.test(current)) {
+              const updated = addOrReplaceAutoLink(current, issueNumber);
+              await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body: updated });
+            }
+
+            core.info(`Linked PR #${pr.number} ↔ Issue #${issueNumber}`);
+
+            // ---- 6) Assignee: PR 작성자만 자동 지정 -----------------------------------
+            try {
+              const author = pr?.user?.login;
+              if (author) {
+                try {
+                  await github.rest.issues.addAssignees({ owner, repo, issue_number: issueNumber, assignees: [author] });
+                  core.info(`Issue #${issueNumber} assignee: ${author}`);
+                } catch (e) { core.info(`Skip assigning issue: ${e.message}`); }
+                try {
+                  await github.rest.issues.addAssignees({ owner, repo, issue_number: pr.number, assignees: [author] });
+                  core.info(`PR #${pr.number} assignee: ${author}`);
+                } catch (e) { core.info(`Skip assigning PR: ${e.message}`); }
+              }
+            } catch (e) { core.info(`Assign block failed: ${e.message}`); }
+
+            // ---- 7) Projects(v2): PR & Issue 추가 + Status -----------------------------
+            try {
+              const login  = process.env.PROJECT_OWNER || context.repo.owner;
+              const number = Number(process.env.PROJECT_NUMBER || 1);
+
+              // 7-1) Project ID 조회 (조직 → 실패 시 사용자 순차 시도)
+              let projectId = null;
+              try {
+                const r = await github.graphql(
+                  `query($login:String!,$number:Int!){
+                    organization(login:$login){ projectV2(number:$number){ id title } }
+                  }`, { login, number }
+                );
+                projectId = r?.organization?.projectV2?.id || null;
+              } catch (e) { core.info("Projects: org lookup failed → " + e.message); }
+              if (!projectId) {
+                try {
+                  const r2 = await github.graphql(
+                    `query($login:String!,$number:Int!){
+                      user(login:$login){ projectV2(number:$number){ id title } }
+                    }`, { login, number }
+                  );
+                  projectId = r2?.user?.projectV2?.id || null;
+                } catch (e) { core.info("Projects: user lookup failed → " + e.message); }
+              }
+              if (!projectId) { core.info(`Projects: projectId not found for ${login}#${number}`); return; }
+
+              // 7-2) 노드 ID
+              const [iss, prr] = await Promise.all([
+                github.rest.issues.get({ owner, repo, issue_number: issueNumber }),
+                github.rest.pulls.get({ owner, repo, pull_number: pr.number })
+              ]);
+              const issueNodeId = iss.data.node_id;
+              const prNodeId    = prr.data.node_id;
+
+              // 7-3) 아이템 추가(멱등)
+              const listQ = `
+                query($projectId:ID!, $after:String) {
+                  node(id:$projectId) {
+                    ... on ProjectV2 {
+                      items(first:50, after:$after) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes { id content { ... on Issue { id } ... on PullRequest { id } } }
+                      }
+                    }
+                  }
+                }`;
+              const addM = `
+                mutation($projectId:ID!, $contentId:ID!) {
+                  addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) {
+                    item { id }
+                  }
+                }`;
+              const addIfMissing = async (contentId) => {
+                let cursor = null, found = null;
+                while (true) {
+                  const r = await github.graphql(listQ, { projectId, after: cursor });
+                  const items = r?.node?.items?.nodes || [];
+                  for (const it of items) if (it?.content?.id === contentId) { found = it.id; break; }
+                  if (found || !r?.node?.items?.pageInfo?.hasNextPage) break;
+                  cursor = r.node.items.pageInfo.endCursor;
+                }
+                if (found) return found;
+                const a = await github.graphql(addM, { projectId, contentId });
+                return a?.addProjectV2ItemById?.item?.id || null;
+              };
+              const issueItemId = await addIfMissing(issueNodeId);
+              const prItemId    = await addIfMissing(prNodeId);
+              core.info(`Projects: linked (issueItem=${issueItemId}, prItem=${prItemId})`);
+
+              // 7-4) Status 설정
+              const desiredStatus = pr.draft ? "Ready" : "In progress";
+              const fieldsQ = `
+                query($projectId:ID!) {
+                  node(id:$projectId) {
+                    ... on ProjectV2 {
+                      fields(first:50) {
+                        nodes {
+                          ... on ProjectV2FieldCommon { id name dataType }
+                          ... on ProjectV2SingleSelectField { id name options { id name } }
+                        }
+                      }
+                    }
+                  }
+                }`;
+              const fr = await github.graphql(fieldsQ, { projectId });
+              const fields = fr?.node?.fields?.nodes || [];
+              const statusField = fields.find(f => f.name === "Status" && f.options);
+              if (statusField) {
+                const opt = statusField.options.find(o => o.name === desiredStatus);
+                if (opt) {
+                  const setM = `
+                    mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optId:String!) {
+                      updateProjectV2ItemFieldValue(input:{
+                        projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
+                        value:{ singleSelectOptionId:$optId }
+                      }) { projectV2Item { id } }
+                    }`;
+                  if (issueItemId) await github.graphql(setM, { projectId, itemId: issueItemId, fieldId: statusField.id, optId: opt.id });
+                  if (prItemId)    await github.graphql(setM, { projectId, itemId: prItemId,    fieldId: statusField.id, optId: opt.id });
+                  core.info(`Projects: set Status="${desiredStatus}"`);
+                } else {
+                  core.info(`Projects: Status option "${desiredStatus}" not found.`);
+                }
+              } else {
+                core.info('Projects: "Status" field not found.');
+              }
+
+              // 7-5) Roadmap: Start date = PR 생성일 -----------------------------------
+              try {
+                const fieldsQ2 = `
+                  query($projectId:ID!) {
+                    node(id:$projectId) {
+                      ... on ProjectV2 {
+                        fields(first:50) { nodes { ... on ProjectV2FieldCommon { id name dataType } } }
+                      }
+                    }
+                  }`;
+                const fr2 = await github.graphql(fieldsQ2, { projectId });
+                const fields2 = fr2?.node?.fields?.nodes || [];
+                const startFieldId = fields2.find(f => f.name === "Start date" && f.dataType === "DATE")?.id;
+
+                const startDate = (pr.created_at || new Date().toISOString()).substring(0,10);
+
+                const setDate = async (itemId, fieldId, dateStr) => {
+                  if (!itemId || !fieldId || !dateStr) return;
+                  const mut = `
+                    mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $d:Date!) {
+                      updateProjectV2ItemFieldValue(input:{
+                        projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
+                        value:{ date:$d }
+                      }) { projectV2Item { id } }
+                    }`;
+                  await github.graphql(mut, { projectId, itemId, fieldId: fieldId, d: dateStr });
+                };
+
+                await setDate(issueItemId, startFieldId, startDate);
+                await setDate(prItemId,    startFieldId, startDate);
+
+                core.info(`Roadmap Start date set: ${startDate}`);
+              } catch (e) {
+                core.info("Roadmap start date skipped: " + e.message);
+              }
+            } catch (e) {
+              core.info("Projects link/status skipped: " + e.message);
+            }

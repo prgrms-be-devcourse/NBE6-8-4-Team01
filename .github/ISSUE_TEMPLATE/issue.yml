@@ -1,0 +1,64 @@
+name: Issue
+description: 변경 유형을 선택하고, 무엇/왜를 중심으로 작성합니다.
+title: "[TYPE]: <이슈 제목을 50자 이내로>"
+labels:
+  - needs-triage
+body:
+  - type: dropdown
+    id: type
+    attributes:
+      label: 변경 유형 (Type)
+      description: 상단 컨벤션의 유형 중 하나를 선택하세요.
+      options:
+        - FEAT
+        - FIX
+        - REFACTOR
+        - COMMENT
+        - STYLE
+        - TEST
+        - CHORE
+        - INIT
+    validations:
+      required: true
+
+  - type: input
+    id: subject
+    attributes:
+      label: 제목(Subject)
+      description: 첫 글자 대문자, 명령문. 50자 이내.
+      placeholder: 예) 회원가입 기능 추가
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-why
+    attributes:
+      label: 무엇을 / 왜
+      description: 어떻게 보다는 **무엇을**, **왜** 변경하는지 위주로 간단명료하게 작성하세요.
+      placeholder: |
+        - 무엇(What):
+        - 왜(Why):
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: 상세 설명(필요 시)
+      description: 한 줄당 100자 내외. 필요 시만 작성.
+      placeholder: 추가 설명이 필요한 경우에만 작성합니다.
+
+  - type: textarea
+    id: todo
+    attributes:
+      label: ToDoList
+      description: 해야 할 일 체크리스트
+      value: |
+        - [ ] 할 일 1
+        - [ ] 할 일 2
+
+  - type: textarea
+    id: etc
+    attributes:
+      label: 비고(스크린샷/참고자료)
+      description: 스크린샷, 로그, 링크 등
